@@ -1,0 +1,19 @@
+# Python 캐시
+__pycache__/
+*.py[cod]
+
+# 실행하면서 생성되는 가계부 데이터
+/data/
+/test-data/
+/test-import-data/
+
+# 직접 검증할 때 생성하는 CSV
+/export.csv
+/test-export.csv
+
+# Python 가상환경
+.venv/
+venv/
+
+# macOS 파일
+.DS_Store
