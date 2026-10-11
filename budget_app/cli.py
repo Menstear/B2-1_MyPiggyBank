@@ -268,8 +268,15 @@ def cmd_export(args: argparse.Namespace) -> int:
 @measure_time
 def cmd_import(args: argparse.Namespace) -> int:
     service = build_service(args.data_dir)
-    imported, skipped = service.import_csv(Path(args.src))
-    print(f"[완료] imported={imported}, skipped={skipped}")
+    report = service.import_csv_report(Path(args.src))
+    print(f"[완료] imported={report.imported}, skipped={report.skipped}")
+    for issue in report.samples:
+        print(f"[건너뜀] CSV {issue.line}행: {issue.message}")
+        if issue.hint:
+            print(f"[힌트] {issue.hint}")
+    remaining = report.skipped - len(report.samples)
+    if remaining:
+        print(f"[안내] 나머지 {remaining}건의 상세 내역은 생략했습니다.")
     return 0
 
 

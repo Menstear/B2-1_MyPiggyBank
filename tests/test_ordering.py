@@ -22,6 +22,23 @@ def transaction(number: int, date: str = "2024-01-01") -> Transaction:
 
 
 class OrderingTest(unittest.TestCase):
+    def test_tuned_buffer_is_used_for_every_merge_input_and_output(self) -> None:
+        original_open = Path.open
+        buffer_sizes = []
+
+        def track_open(path, *args, **kwargs):
+            buffer_sizes.append(kwargs.get("buffering"))
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(ordering, "_CHUNK_SIZE", 3), \
+             patch.object(ordering, "_MERGE_FAN_IN", 2), \
+             patch.object(ordering, "_IO_BUFFER_SIZE", 4096), \
+             patch.object(Path, "open", track_open):
+            got = list(newest_transactions(transaction(i) for i in range(31)))
+        self.assertEqual([tx.id for tx in got], [f"TX-{i:06d}" for i in range(30, -1, -1)])
+        self.assertGreater(len(buffer_sizes), 10)
+        self.assertEqual(set(buffer_sizes), {4096})
+
     def test_date_then_numeric_id_descending(self) -> None:
         values = [
             transaction(999999),

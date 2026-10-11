@@ -7,7 +7,7 @@ to_dict / from_dict 로 JSON 직렬화 경계를 한곳에 모은다.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -24,7 +24,16 @@ class Transaction:
     tags: list[str] = field(default_factory=list)  # 선택
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """고정 스키마를 직렬화하고, 변경 가능한 태그 목록은 복사한다."""
+        return {
+            "id": self.id,
+            "type": self.type,
+            "date": self.date,
+            "amount": self.amount,
+            "category": self.category,
+            "memo": self.memo,
+            "tags": self.tags.copy(),
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Transaction":

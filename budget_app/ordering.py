@@ -14,8 +14,10 @@ from typing import TextIO
 from .errors import StorageError, ValidationError
 from .models import Transaction
 
-_CHUNK_SIZE = 1000
+# 100k 실측에서 5000건은 병합 패스를 줄이면서 10000건보다 메모리를 절약했다.
+_CHUNK_SIZE = 5000
 _MERGE_FAN_IN = 32
+_IO_BUFFER_SIZE = 8 * 1024
 
 
 def _sort_key(tx: Transaction) -> tuple[str, int, str]:
@@ -58,14 +60,16 @@ def _merged_runs(paths: list[Path]) -> Iterator[Transaction]:
     # 병합하는 동안만 각 입력 파일을 열어 파일 핸들 수를 제한한다.
     with ExitStack() as stack:
         streams = [
-            _read_run(stack.enter_context(path.open("r", encoding="utf-8")))
+            _read_run(stack.enter_context(path.open(
+                "r", encoding="utf-8", buffering=_IO_BUFFER_SIZE
+            )))
             for path in paths
         ]
         yield from heapq.merge(*streams, key=_sort_key, reverse=True)
 
 
 def _write_run(path: Path, transactions: Iterable[Transaction]) -> None:
-    with path.open("w", encoding="utf-8") as file:
+    with path.open("w", encoding="utf-8", buffering=_IO_BUFFER_SIZE) as file:
         for tx in transactions:
             file.write(json.dumps(tx.to_dict(), ensure_ascii=False) + "\n")
 

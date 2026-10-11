@@ -36,6 +36,25 @@ from .validators import (
 
 CSV_HEADER: list[str] = ["date", "type", "category", "amount", "memo", "tags"]
 CSV_REQUIRED: set[str] = {"date", "type", "category", "amount"}
+_IMPORT_SAMPLE_LIMIT = 5
+
+
+@dataclass(frozen=True)
+class ImportIssue:
+    """건너뛴 CSV 레코드의 마지막 물리적 행 번호와 원인/해결 힌트."""
+
+    line: int
+    message: str
+    hint: str
+
+
+@dataclass(frozen=True)
+class ImportReport:
+    """저장 완료된 가져오기 결과. 오류 샘플은 최대 5건만 보관한다."""
+
+    imported: int
+    skipped: int
+    samples: tuple[ImportIssue, ...] = ()
 
 
 @contextmanager
@@ -338,7 +357,12 @@ class BudgetService:
 
     # --------------------------------------------------------------- import
     def import_csv(self, in_path: Path) -> tuple[int, int]:
-        """CSV를 끝까지 읽은 뒤 일괄 저장한다. 반환: (imported, skipped)."""
+        """기존 API: CSV를 일괄 저장하고 (imported, skipped)를 반환한다."""
+        report = self.import_csv_report(in_path)
+        return report.imported, report.skipped
+
+    def import_csv_report(self, in_path: Path) -> ImportReport:
+        """원자적으로 가져오고 건너뛴 행의 번호/원인을 최대 5건 보고한다."""
         if not in_path.exists():
             raise ImportExportError(
                 f"가져올 파일을 찾을 수 없습니다: {in_path}",
@@ -346,6 +370,7 @@ class BudgetService:
             )
         imported = 0
         skipped = 0
+        samples: list[ImportIssue] = []
         counter = self.tx_repo.next_number()  # id는 메모리에서 증가시켜 재스캔 방지
         try:
             with _large_csv_fields(), in_path.open("r", encoding="utf-8", newline="") as f:
@@ -357,6 +382,9 @@ class BudgetService:
                         f"CSV 헤더에 필수 컬럼이 없습니다: {missing}",
                         "필수 컬럼: date,type,category,amount (memo,tags 선택)",
                     )
+                # 한 번의 가져오기에서 사용할 카테고리를 한 번만 읽는다.
+                # 행마다 파일을 열고 선형 탐색하던 비용을 O(C + N)으로 줄인다.
+                known_categories = set(self.categories.list_names())
 
                 def valid_transactions() -> Iterator[Transaction]:
                     nonlocal counter, imported, skipped
@@ -367,9 +395,11 @@ class BudgetService:
                                 date_ = validate_date(row.get("date", ""))
                                 amount_ = validate_amount(row.get("amount", ""))
                                 category_ = (row.get("category") or "").strip()
-                                if not self.categories.exists(category_):
-                                    skipped += 1
-                                    continue
+                                if category_ not in known_categories:
+                                    raise CategoryError(
+                                        f"등록되지 않은 카테고리입니다: {category_!r}",
+                                        "category add 로 추가하거나 등록된 카테고리로 수정하세요.",
+                                    )
                                 tx = Transaction(
                                     id=f"TX-{counter:06d}",
                                     type=type_,
@@ -379,8 +409,10 @@ class BudgetService:
                                     memo=row.get("memo") or "",
                                     tags=parse_tags(row.get("tags") or ""),
                                 )
-                            except ValidationError:
+                            except (ValidationError, CategoryError) as exc:
                                 skipped += 1
+                                if len(samples) < _IMPORT_SAMPLE_LIMIT:
+                                    samples.append(ImportIssue(reader.line_num, exc.message, exc.hint))
                                 continue
                             counter += 1
                             imported += 1
@@ -397,4 +429,4 @@ class BudgetService:
                 f"{in_path} 를 읽을 수 없습니다: {exc}",
                 "파일 경로, 읽기 권한, UTF-8 인코딩과 CSV 형식을 확인하세요. 거래는 저장되지 않았습니다.",
             ) from exc
-        return imported, skipped
+        return ImportReport(imported, skipped, tuple(samples))

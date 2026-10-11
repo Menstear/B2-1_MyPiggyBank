@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "python": "3.13.12",
+    "system": "Darwin",
+    "release": "25.6.0",
+    "machine": "arm64",
+    "cpu_count": 8
+  },
+  "configuration": {
+    "rows": 100000,
+    "repeat": 3,
+    "chunk_size": 5000,
+    "fan_in": 32,
+    "io_buffer_size": 65536
+  },
+  "measurement": "time excludes setup/startup/CLI printing; RSS includes process setup; tracemalloc is a separate trial",
+  "results": [
+    {
+      "case": "search_all",
+      "result_records": 100000,
+      "median_seconds": 0.8282202089903876,
+      "min_seconds": 0.8245849999948405,
+      "max_seconds": 0.8357568749925122,
+      "max_peak_rss_mib": 31.75,
+      "python_peak_mib": 3.5904197692871094,
+      "samples": [
+        {
+          "seconds": 0.8357568749925122,
+          "result_records": 100000,
+          "peak_rss_mib": 31.75,
+          "python_peak_mib": null
+        },
+        {
+          "seconds": 0.8282202089903876,
+          "result_records": 100000,
+          "peak_rss_mib": 31.734375,
+          "python_peak_mib": null
+        },
+        {
+          "seconds": 0.8245849999948405,
+          "result_records": 100000,
+          "peak_rss_mib": 31.6875,
+          "python_peak_mib": null
+        }
+      ]
+    }
+  ]
+}

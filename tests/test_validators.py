@@ -15,6 +15,15 @@ from budget_app.validators import (
 
 
 class ValidateDateTest(unittest.TestCase):
+    def test_iso_date_preserves_leap_days_and_four_digit_year_boundaries(self) -> None:
+        for value, expected in (("0001-1-5", "0001-01-05"), ("9999-12-31", "9999-12-31"),
+                                ("2000-2-29", "2000-02-29"), (" 2024-2-29 ", "2024-02-29")):
+            with self.subTest(value=value):
+                self.assertEqual(validate_date(value), expected)
+        for value in ("1900-02-29", "2023-02-29", "0000-01-01", "10000-01-01"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                validate_date(value)
+
     def test_normalizes_non_zero_padded(self) -> None:
         # strptime 은 통과하지만 저장은 정규화돼야 한다(회귀 방지).
         self.assertEqual(validate_date("2024-1-5"), "2024-01-05")
@@ -27,6 +36,10 @@ class ValidateDateTest(unittest.TestCase):
 
 
 class ValidateMonthTest(unittest.TestCase):
+    def test_four_digit_year_boundaries(self) -> None:
+        self.assertEqual(validate_month("0001-1"), "0001-01")
+        self.assertEqual(validate_month("9999-12"), "9999-12")
+
     def test_normalizes(self) -> None:
         self.assertEqual(validate_month("2024-1"), "2024-01")
 

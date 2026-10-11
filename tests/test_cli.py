@@ -95,6 +95,45 @@ class CliExitCodeTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_import_prints_bounded_row_details_and_remaining_count(self) -> None:
+        path = Path(self.data_dir) / "input.csv"
+        path.write_text("date,type,category,amount\n"
+                        + "2024-01-01,expense,food,-1\n" * 7
+                        + "2024-01-02,expense,food,1000\n", encoding="utf-8")
+        proc = run(["import", "--from", str(path)], self.data_dir)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("[완료] imported=1, skipped=7", proc.stdout)
+        self.assertEqual(proc.stdout.count("[건너뜀]"), 5)
+        self.assertIn("CSV 2행: 금액은 양수여야 합니다: -1", proc.stdout)
+        self.assertIn("CSV 6행:", proc.stdout)
+        self.assertIn("나머지 2건", proc.stdout)
+        self.assertNotIn("CSV 7행:", proc.stdout)
+        self.assertEqual(len(build_service(self.data_dir).list_transactions(10)), 1)
+
+    def test_import_failure_prints_no_success_or_skip_report_and_preserves_data(self) -> None:
+        service = build_service(self.data_dir)
+        service.add_transaction(type="expense", date="2024-01-01", amount=1000, category="food")
+        original = service.tx_repo.path.read_bytes()
+        path = Path(self.data_dir) / "broken.csv"
+        path.write_text("date,type,category,amount,memo\n"
+                        "2024-01-01,expense,food,-1,잘못된 금액\n"
+                        "2024-01-02,expense,food,2000,정상\n"
+                        '2024-01-03,expense,food,3000,"닫히지 않은 따옴표\n', encoding="utf-8")
+        proc = run(["import", "--from", str(path)], self.data_dir)
+        self.assertEqual(proc.returncode, 6, proc.stdout + proc.stderr)
+        self.assertIn("[오류]", proc.stdout)
+        self.assertNotIn("[완료]", proc.stdout)
+        self.assertNotIn("[건너뜀]", proc.stdout)
+        self.assertNotIn("Traceback", proc.stdout + proc.stderr)
+        self.assertEqual(service.tx_repo.path.read_bytes(), original)
+
+    def test_successful_import_has_no_skip_details(self) -> None:
+        path = Path(self.data_dir) / "valid.csv"
+        path.write_text("date,type,category,amount\n2024-01-01,expense,food,1000\n", encoding="utf-8")
+        proc = run(["import", "--from", str(path)], self.data_dir)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "[완료] imported=1, skipped=0")
+
     def test_no_command_prints_help_nonzero(self) -> None:
         proc = subprocess.run(
             [sys.executable, "-m", "budget_app"],

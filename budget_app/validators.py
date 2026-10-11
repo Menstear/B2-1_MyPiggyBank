@@ -17,7 +17,7 @@ def validate_date(value: str) -> str:
     """'YYYY-MM-DD' 형식 검증. 올바르면 zero-pad 정규화한 문자열을 반환.
 
     strptime 은 '2024-1-5' 같은 비정규 입력도 통과시키므로,
-    strftime 으로 다시 포맷해 '2024-01-05' 로 정규화한다.
+    date.isoformat 으로 '2024-01-05' 로 정규화한다.
     (정규화하지 않으면 월 매칭 date[:7] 과 날짜 문자열 비교가 틀어진다.)
     """
     text = (value or "").strip()
@@ -28,7 +28,7 @@ def validate_date(value: str) -> str:
             f"날짜 형식이 올바르지 않습니다: {text!r}",
             "예: 2024-01-15 (YYYY-MM-DD)",
         )
-    return parsed.strftime("%Y-%m-%d")
+    return parsed.date().isoformat()
 
 
 def validate_month(value: str) -> str:
@@ -41,7 +41,7 @@ def validate_month(value: str) -> str:
             f"월 형식이 올바르지 않습니다: {text!r}",
             "예: 2024-01 (YYYY-MM)",
         )
-    return parsed.strftime("%Y-%m")
+    return f"{parsed.year:04d}-{parsed.month:02d}"
 
 
 def validate_type(value: str) -> str:

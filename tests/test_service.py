@@ -390,6 +390,50 @@ class CsvTest(ServiceTestBase):
         imported, skipped = self.svc.import_csv(csv_path)
         self.assertEqual((imported, skipped), (1, 3))
 
+    def test_import_report_identifies_reasons_and_multiline_record_end(self) -> None:
+        path = self.base / "report.csv"
+        with path.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(["date", "type", "category", "amount", "memo"])
+            writer.writerow(["2024-02-01", "expense", "food", "1000", "정상"])
+            writer.writerow(["2024-13-99", "expense", "food", "1000", "두\n줄"])
+            writer.writerow(["2024-02-02", "expense", "unknown", "1000", "미등록"])
+            writer.writerow(["2024-02-03", "expense", "food", "-1", "금액 오류"])
+            writer.writerow(["2024-02-04", "expense", "food", "2000", "정상"])
+        report = self.svc.import_csv_report(path)
+        self.assertEqual((report.imported, report.skipped), (2, 3))
+        self.assertEqual([issue.line for issue in report.samples], [4, 5, 6])
+        self.assertIn("날짜", report.samples[0].message)
+        self.assertIn("unknown", report.samples[1].message)
+        self.assertIn("금액", report.samples[2].message)
+        self.assertTrue(all(issue.hint for issue in report.samples))
+        self.assertEqual([tx.id for tx in self.svc.list_transactions(10)], ["TX-000002", "TX-000001"])
+
+    def test_import_report_bounds_samples_and_preserves_all_skipped_storage(self) -> None:
+        self.add()
+        original = self.svc.tx_repo.path.read_bytes()
+        path = self.base / "skipped.csv"
+        path.write_text("date,type,category,amount\n" + "2024-01-01,expense,food,-1\n" * 1000,
+                        encoding="utf-8")
+        report = self.svc.import_csv_report(path)
+        self.assertEqual((report.imported, report.skipped), (0, 1000))
+        self.assertEqual([issue.line for issue in report.samples], [2, 3, 4, 5, 6])
+        self.assertEqual(self.svc.tx_repo.path.read_bytes(), original)
+
+    def test_import_loads_categories_once_and_refreshes_on_next_call(self) -> None:
+        path = self.base / "categories.csv"
+        path.write_text("date,type,category,amount\n" + "2024-01-01,expense,travel,1000\n" * 10,
+                        encoding="utf-8")
+        with patch.object(self.svc.categories, "list_names", wraps=self.svc.categories.list_names) as names, \
+             patch.object(self.svc.categories, "exists", side_effect=AssertionError("행마다 재조회")):
+            self.assertEqual(self.svc.import_csv(path), (0, 10))
+            names.assert_called_once_with()
+        self.svc.add_category("travel")
+        with patch.object(self.svc.categories, "list_names", wraps=self.svc.categories.list_names) as names:
+            report = self.svc.import_csv_report(path)
+            self.assertEqual((report.imported, report.skipped, report.samples), (10, 0, ()))
+            names.assert_called_once_with()
+
     def test_import_rejects_bad_header(self) -> None:
         csv_path = self.base / "bad.csv"
         csv_path.write_text("foo,bar\n1,2\n", encoding="utf-8")

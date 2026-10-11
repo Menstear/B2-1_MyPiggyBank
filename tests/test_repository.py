@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import errno
 import os
 import tempfile
 import unittest
@@ -128,6 +129,44 @@ class TransactionRepositoryTest(unittest.TestCase):
                 self.assertEqual(list(self.base.glob("*.tmp")), [])
         self.repo.append(make_tx(2))
         self.assertEqual([t.id for t in self.repo.stream()], ["TX-000001", "TX-000002"])
+
+    def test_disk_full_during_rewrite_preserves_original_and_cleans_temp(self) -> None:
+        self.repo.append(make_tx(1, memo="원본"))
+        original = self.repo.path.read_bytes()
+        real_fdopen = os.fdopen
+
+        class FullDiskFile:
+            def __init__(self, file):
+                self.file = file
+                self.writes = 0
+
+            def __getattr__(self, name):
+                return getattr(self.file, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return self.file.__exit__(*args)
+
+            def write(self, text):
+                self.writes += 1
+                if self.writes == 2:
+                    self.file.write(text[:7])
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                return self.file.write(text)
+
+        with patch("budget_app.repository.os.fdopen",
+                   side_effect=lambda *args, **kwargs: FullDiskFile(real_fdopen(*args, **kwargs))):
+            with self.assertRaises(StorageError) as error:
+                self.repo.rewrite(iter([make_tx(1, amount=2000), make_tx(2)]))
+        self.assertIsInstance(error.exception.__cause__, OSError)
+        self.assertEqual(error.exception.__cause__.errno, errno.ENOSPC)
+        self.assertEqual(self.repo.path.read_bytes(), original)
+        self.assertEqual(list(self.base.glob("*.tmp")), [])
+        self.repo.rewrite(iter([make_tx(1, amount=2000), make_tx(2)]))
+        self.assertEqual([(tx.id, tx.amount) for tx in self.repo.stream()],
+                         [("TX-000001", 2000), ("TX-000002", 1000)])
 
     def test_interrupted_append_restores_original_bytes(self) -> None:
         self.repo.append(make_tx(1))

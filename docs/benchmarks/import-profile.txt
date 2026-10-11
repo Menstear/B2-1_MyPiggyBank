@@ -1,0 +1,22 @@
+CSV 100k -> empty ledger, cProfile, 2026-10-11
+Python 3.13.12 / Darwin 25.6.0 / arm64
+Stage: category snapshot + fixed-schema serialization; before ISO date normalization.
+This is an instrumented profile, NOT an ordinary benchmark timing sample.
+
+6307291 function calls (6307184 primitive calls) in 7.989 seconds
+Ordered by cumulative time; key rows:
+
+ncalls    self_seconds    cumulative_seconds    function
+1         0.000           8.003                 import_csv
+1         0.000           8.003                 import_csv_report
+1         0.000           8.003                 append_many
+1         0.071           7.995                 _atomic_write_jsonl
+100001    0.278           7.428                 valid_transactions
+100000    0.057           6.583                 validate_date
+100038    5.666           5.666                 datetime.date.strftime
+100000    0.055           0.854                 strptime
+100000    0.069           0.366                 json.dumps
+100001    0.126           0.252                 csv.DictReader.__next__
+
+Fixture dates were generated before profiling; the date validation path calls
+strftime once for every imported row at this stage.
