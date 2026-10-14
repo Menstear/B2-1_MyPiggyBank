@@ -93,6 +93,24 @@ class TransactionRepositoryTest(unittest.TestCase):
         self.assertEqual([t.id for t in txs], ["TX-000001", "TX-000002"])
         self.assertEqual(txs[0].tags, ["a", "b"])
 
+    def test_append_preserves_record_boundary_for_all_line_endings(self) -> None:
+        self.repo.append(make_tx(1, memo="줄바꿈 확인"))
+        record = self.repo.path.read_bytes().rstrip(b"\n")
+        for ending in (b"", b"\n", b"\r\n", b"\r"):
+            with self.subTest(ending=ending):
+                original = record + ending
+                self.repo.path.write_bytes(original)
+                self.repo.append(make_tx(2))
+                expected_prefix = original if ending else original + b"\n"
+                self.assertTrue(self.repo.path.read_bytes().startswith(expected_prefix + b"{"))
+                self.assertEqual(list(self.repo.stream()), [make_tx(1, memo="줄바꿈 확인"), make_tx(2)])
+
+    def test_append_to_empty_file_does_not_insert_blank_line(self) -> None:
+        self.repo.path.touch()
+        self.repo.append(make_tx(1))
+        self.assertTrue(self.repo.path.read_bytes().startswith(b"{"))
+        self.assertEqual(list(self.repo.stream()), [make_tx(1)])
+
     def test_stream_missing_file_is_empty(self) -> None:
         self.assertEqual(list(self.repo.stream()), [])
 
@@ -105,7 +123,7 @@ class TransactionRepositoryTest(unittest.TestCase):
             if path == self.repo.path and args and args[0] == "r+b" and rollback_error is not None:
                 raise rollback_error
             file = real_open(path, *args, **kwargs)
-            if path == self.repo.path and args and args[0] == "ab":
+            if path == self.repo.path and args and args[0] == "a+b":
                 return AppendFileProbe(file, stage, error)
             return file
 
@@ -113,20 +131,23 @@ class TransactionRepositoryTest(unittest.TestCase):
 
     def test_append_io_failures_restore_original_bytes(self) -> None:
         self.repo.append(make_tx(1, memo="원본 거래"))
-        original = self.repo.path.read_bytes()
-        for stage in ("write", "flush", "close", "fsync"):
-            with self.subTest(stage=stage):
-                with self._open_probe(stage, OSError("디스크 부족")):
-                    if stage == "fsync":
-                        with patch("budget_app.repository.os.fsync", side_effect=[OSError("동기화 실패"), None]):
+        record = self.repo.path.read_bytes().rstrip(b"\n")
+        for ending in (b"\n", b""):
+            original = record + ending
+            self.repo.path.write_bytes(original)
+            for stage in ("write", "flush", "close", "fsync"):
+                with self.subTest(ending=ending, stage=stage):
+                    with self._open_probe(stage, OSError("디스크 부족")):
+                        if stage == "fsync":
+                            with patch("budget_app.repository.os.fsync", side_effect=[OSError("동기화 실패"), None]):
+                                with self.assertRaises(StorageError):
+                                    self.repo.append(make_tx(2, memo="추가 거래"))
+                        else:
                             with self.assertRaises(StorageError):
                                 self.repo.append(make_tx(2, memo="추가 거래"))
-                    else:
-                        with self.assertRaises(StorageError):
-                            self.repo.append(make_tx(2, memo="추가 거래"))
-                self.assertEqual(self.repo.path.read_bytes(), original)
-                self.assertEqual([t.id for t in self.repo.stream()], ["TX-000001"])
-                self.assertEqual(list(self.base.glob("*.tmp")), [])
+                    self.assertEqual(self.repo.path.read_bytes(), original)
+                    self.assertEqual([t.id for t in self.repo.stream()], ["TX-000001"])
+                    self.assertEqual(list(self.base.glob("*.tmp")), [])
         self.repo.append(make_tx(2))
         self.assertEqual([t.id for t in self.repo.stream()], ["TX-000001", "TX-000002"])
 
@@ -170,7 +191,8 @@ class TransactionRepositoryTest(unittest.TestCase):
 
     def test_interrupted_append_restores_original_bytes(self) -> None:
         self.repo.append(make_tx(1))
-        original = self.repo.path.read_bytes()
+        original = self.repo.path.read_bytes().rstrip(b"\n")
+        self.repo.path.write_bytes(original)
         with self._open_probe("write", KeyboardInterrupt()):
             with self.assertRaises(KeyboardInterrupt):
                 self.repo.append(make_tx(2))
@@ -199,7 +221,9 @@ class TransactionRepositoryTest(unittest.TestCase):
     def test_append_retries_short_writes(self) -> None:
         with self._open_probe("short_write", OSError()):
             self.repo.append(make_tx(1, memo="여러 번 나누어 쓰기"))
-        self.assertEqual(list(self.repo.stream()), [make_tx(1, memo="여러 번 나누어 쓰기")])
+            self.repo.path.write_bytes(self.repo.path.read_bytes().rstrip(b"\n"))
+            self.repo.append(make_tx(2))
+        self.assertEqual(list(self.repo.stream()), [make_tx(1, memo="여러 번 나누어 쓰기"), make_tx(2)])
 
     def test_append_many_keeps_existing_and_adds_stream(self) -> None:
         self.repo.append(make_tx(1))
@@ -268,6 +292,50 @@ class TransactionRepositoryTest(unittest.TestCase):
     def test_update_missing_raises(self) -> None:
         with self.assertRaises(NotFoundError):
             self.repo.update("TX-999999", {"amount": 1})
+        self.assertFalse(self.repo.path.exists())
+        self.assertEqual(list(self.base.glob("*.tmp")), [])
+
+    def test_missing_update_and_delete_preserve_bytes_inode_without_commit(self) -> None:
+        self.repo.append(make_tx(1))
+        self.repo.path.write_bytes(b"\n  \n" + self.repo.path.read_bytes().rstrip(b"\n"))
+        original = self.repo.path.read_bytes()
+        inode = self.repo.path.stat().st_ino
+        for operation in ("update", "delete"):
+            with self.subTest(operation=operation):
+                with patch("budget_app.repository.os.fsync") as fsync:
+                    with patch("budget_app.repository.os.replace") as replace:
+                        with patch.object(self.repo, "stream", wraps=self.repo.stream) as stream:
+                            if operation == "update":
+                                with self.assertRaises(NotFoundError):
+                                    self.repo.update("TX-999999", {"amount": 1})
+                            else:
+                                self.assertFalse(self.repo.delete("TX-999999"))
+                            stream.assert_called_once_with()
+                        fsync.assert_not_called()
+                        replace.assert_not_called()
+                self.assertEqual(self.repo.path.read_bytes(), original)
+                self.assertEqual(self.repo.path.stat().st_ino, inode)
+                self.assertEqual(list(self.base.glob("*.tmp")), [])
+
+    def test_delete_missing_file_does_not_create_file(self) -> None:
+        with patch("budget_app.repository.os.fsync") as fsync:
+            with patch("budget_app.repository.os.replace") as replace:
+                self.assertFalse(self.repo.delete("TX-999999"))
+                fsync.assert_not_called()
+                replace.assert_not_called()
+        self.assertFalse(self.repo.path.exists())
+        self.assertEqual(list(self.base.glob("*.tmp")), [])
+
+    def test_successful_update_and_delete_read_ledger_once(self) -> None:
+        self.repo.append_many([make_tx(1), make_tx(2), make_tx(3)])
+        with patch.object(self.repo, "stream", wraps=self.repo.stream) as stream:
+            updated = self.repo.update("TX-000002", {"amount": 2000})
+            stream.assert_called_once_with()
+        self.assertEqual(updated.amount, 2000)
+        with patch.object(self.repo, "stream", wraps=self.repo.stream) as stream:
+            self.assertTrue(self.repo.delete("TX-000001"))
+            stream.assert_called_once_with()
+        self.assertEqual(list(self.repo.stream()), [make_tx(2, amount=2000), make_tx(3)])
 
     def test_delete(self) -> None:
         self.repo.append(make_tx(1))
@@ -346,6 +414,11 @@ class CategoryStoreTest(unittest.TestCase):
     def test_add_duplicate_returns_false(self) -> None:
         self.assertTrue(self.store.add("coffee"))
         self.assertFalse(self.store.add("coffee"))
+
+    def test_add_after_record_without_final_newline(self) -> None:
+        self.store.path.write_bytes(b'{"name": "coffee"}')
+        self.assertTrue(self.store.add("tea"))
+        self.assertEqual(self.store.list_names(), ["coffee", "tea"])
 
     def test_remove(self) -> None:
         self.store.add("coffee")

@@ -34,6 +34,23 @@ class ValidateDateTest(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 validate_date(bad)
 
+    def test_fast_and_fallback_paths_have_same_calendar_validation(self) -> None:
+        for value in ("0001-01-01", "2000-02-29", "2024-04-30", "9999-12-31"):
+            year, month, day = value.split("-")
+            with self.subTest(value=value):
+                self.assertEqual(validate_date(value), value)
+                self.assertEqual(validate_date(f"{year}-{int(month)}-{int(day)}"), value)
+        for value in ("1900-02-29", "2023-02-29", "2024-04-31", "2024-00-10", "2024-01-00"):
+            year, month, day = value.split("-")
+            for spelling in (value, f"{year}-{int(month)}-{int(day)}"):
+                with self.subTest(value=spelling), self.assertRaises(ValidationError):
+                    validate_date(spelling)
+
+    def test_does_not_accept_other_iso_formats(self) -> None:
+        for value in ("20240105", "2024-W01-5", "2024W015", "2024-01-05T00:00:00", "2024-005"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                validate_date(value)
+
 
 class ValidateMonthTest(unittest.TestCase):
     def test_four_digit_year_boundaries(self) -> None:

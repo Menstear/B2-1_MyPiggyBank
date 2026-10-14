@@ -76,7 +76,7 @@ def _large_csv_fields() -> Iterator[None]:
 
 @dataclass
 class SearchQuery:
-    """검색/필터 조건."""
+    """생성 시 날짜와 타입을 한 번 검증/정규화하는 검색·필터 조건."""
 
     date_from: Optional[str] = None
     date_to: Optional[str] = None
@@ -84,6 +84,19 @@ class SearchQuery:
     type: Optional[str] = None
     q: Optional[str] = None       # 메모 키워드
     tag: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.date_from is not None:
+            self.date_from = validate_date(self.date_from)
+        if self.date_to is not None:
+            self.date_to = validate_date(self.date_to)
+        if self.type is not None:
+            self.type = validate_type(self.type)
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValidationError(
+                "검색 시작일이 종료일보다 늦습니다.",
+                "--from 날짜가 --to 날짜보다 늦지 않도록 지정하세요.",
+            )
 
     def matches(self, tx: Transaction) -> bool:
         # 날짜는 'YYYY-MM-DD' 라 문자열 비교로 대소 판정이 가능하다.
@@ -371,11 +384,20 @@ class BudgetService:
         imported = 0
         skipped = 0
         samples: list[ImportIssue] = []
-        counter = self.tx_repo.next_number()  # id는 메모리에서 증가시켜 재스캔 방지
+        counter: int | None = None  # 첫 정상 행에서만 ID를 조회한 뒤 메모리에서 증가
         try:
             with _large_csv_fields(), in_path.open("r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f, strict=True)
-                fields = set(reader.fieldnames or [])
+                fieldnames = reader.fieldnames or []
+                duplicates = sorted(
+                    name for name, count in Counter(fieldnames).items() if count > 1
+                )
+                if duplicates:
+                    raise ImportExportError(
+                        f"CSV 헤더에 중복 컬럼이 있습니다: {', '.join(duplicates)}",
+                        "컬럼명을 각각 한 번만 쓰세요. 필수 컬럼: date,type,category,amount",
+                    )
+                fields = set(fieldnames)
                 if not CSV_REQUIRED.issubset(fields):
                     missing = ", ".join(sorted(CSV_REQUIRED - fields))
                     raise ImportExportError(
@@ -391,6 +413,19 @@ class BudgetService:
                     try:
                         for row in reader:
                             try:
+                                if None in row:
+                                    raise ValidationError(
+                                        "CSV 값의 개수가 헤더보다 많습니다.",
+                                        "금액에는 천 단위 쉼표를 쓰지 말고, 메모의 쉼표는 따옴표로 감싸세요.",
+                                    )
+                                missing_values = sorted(
+                                    name for name in CSV_REQUIRED if row.get(name) is None
+                                )
+                                if missing_values:
+                                    raise ValidationError(
+                                        f"CSV 행에 필수 컬럼 값이 없습니다: {', '.join(missing_values)}",
+                                        "헤더 순서에 맞춰 date,type,category,amount 값을 모두 입력하세요.",
+                                    )
                                 type_ = validate_type(row.get("type", ""))
                                 date_ = validate_date(row.get("date", ""))
                                 amount_ = validate_amount(row.get("amount", ""))
@@ -400,20 +435,22 @@ class BudgetService:
                                         f"등록되지 않은 카테고리입니다: {category_!r}",
                                         "category add 로 추가하거나 등록된 카테고리로 수정하세요.",
                                     )
-                                tx = Transaction(
-                                    id=f"TX-{counter:06d}",
-                                    type=type_,
-                                    date=date_,
-                                    amount=amount_,
-                                    category=category_,
-                                    memo=row.get("memo") or "",
-                                    tags=parse_tags(row.get("tags") or ""),
-                                )
                             except (ValidationError, CategoryError) as exc:
                                 skipped += 1
                                 if len(samples) < _IMPORT_SAMPLE_LIMIT:
                                     samples.append(ImportIssue(reader.line_num, exc.message, exc.hint))
                                 continue
+                            if counter is None:
+                                counter = self.tx_repo.next_number()
+                            tx = Transaction(
+                                id=f"TX-{counter:06d}",
+                                type=type_,
+                                date=date_,
+                                amount=amount_,
+                                category=category_,
+                                memo=row.get("memo") or "",
+                                tags=parse_tags(row.get("tags") or ""),
+                            )
                             counter += 1
                             imported += 1
                             yield tx

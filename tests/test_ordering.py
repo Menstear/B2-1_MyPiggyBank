@@ -22,6 +22,29 @@ def transaction(number: int, date: str = "2024-01-01") -> Transaction:
 
 
 class OrderingTest(unittest.TestCase):
+    def test_up_to_one_chunk_sorts_without_temporary_files(self) -> None:
+        for size in (0, 1, 3, 5):
+            with self.subTest(size=size), \
+                 patch.object(ordering, "_CHUNK_SIZE", 5), \
+                 patch.object(ordering, "TemporaryDirectory", side_effect=PermissionError) as temp, \
+                 patch.object(ordering, "_write_run") as write:
+                values = [transaction(i, f"2024-01-{i % 2 + 1:02d}")
+                          for i in range(size)]
+                got = list(newest_transactions(iter(values)))
+                expected = sorted(values, key=lambda tx: (tx.date, int(tx.id[3:])), reverse=True)
+                self.assertEqual(got, expected)
+                temp.assert_not_called()
+                write.assert_not_called()
+
+    def test_one_record_over_chunk_limit_uses_external_sort(self) -> None:
+        with patch.object(ordering, "_CHUNK_SIZE", 3), \
+             patch.object(ordering, "TemporaryDirectory", wraps=tempfile.TemporaryDirectory) as temp, \
+             patch.object(ordering, "_write_run", wraps=ordering._write_run) as write:
+            got = list(newest_transactions(transaction(i) for i in range(4)))
+        self.assertEqual([tx.id for tx in got], [f"TX-{i:06d}" for i in range(3, -1, -1)])
+        temp.assert_called_once()
+        self.assertEqual(write.call_count, 2)
+
     def test_tuned_buffer_is_used_for_every_merge_input_and_output(self) -> None:
         original_open = Path.open
         buffer_sizes = []
@@ -164,9 +187,10 @@ class OrderingTest(unittest.TestCase):
             with patch.object(
                 ordering, "TemporaryDirectory",
                 side_effect=lambda **kwargs: original_directory(dir=parent, **kwargs),
-            ), patch.object(ordering, "_write_run", side_effect=OSError("disk full")):
+            ), patch.object(ordering, "_CHUNK_SIZE", 1), \
+                 patch.object(ordering, "_write_run", side_effect=OSError("disk full")):
                 with self.assertRaisesRegex(StorageError, "disk full"):
-                    list(newest_transactions([transaction(1)]))
+                    list(newest_transactions([transaction(1), transaction(2)]))
             self.assertEqual(list(Path(parent).iterdir()), [])
 
 

@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 from pathlib import Path
 from typing import Callable
 
 from .decorators import handle_errors, log_execution, measure_time
 from .errors import ValidationError
+from .formatting import format_integer
 from .repository import (
     BudgetStore,
     CategoryStore,
@@ -47,8 +49,25 @@ def build_service(data_dir: str) -> BudgetService:
 
 def format_tx_line(tx: Transaction) -> str:
     return (
-        f"{tx.id} | {tx.date} | {tx.type} | {tx.category} | {tx.amount} | {tx.memo}"
+        f"{tx.id} | {tx.date} | {tx.type} | {tx.category} | "
+        f"{format_integer(tx.amount)} | {tx.memo}"
     )
+
+
+def _format_budget_rate(total_expense: int, budget_amount: int) -> str:
+    """실수 변환 없이 사용률을 소수 1자리로 표시한다.
+
+    정확히 중간인 값은 짝수 쪽으로 반올림한다(예: 0.05% → 0.0%).
+    """
+    if budget_amount == 0:
+        return "0.0"
+    tenths, remainder = divmod(total_expense * 1000, budget_amount)
+    if remainder * 2 > budget_amount or (
+        remainder * 2 == budget_amount and tenths % 2
+    ):
+        tenths += 1
+    whole, decimal = divmod(tenths, 10)
+    return f"{format_integer(whole)}.{decimal}"
 
 
 def prompt_valid(label: str, validator: Callable[[str], object]) -> object:
@@ -120,10 +139,10 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_search(args: argparse.Namespace) -> int:
     service = build_service(args.data_dir)
     query = SearchQuery(
-        date_from=validate_date(args.date_from) if args.date_from else None,
-        date_to=validate_date(args.date_to) if args.date_to else None,
+        date_from=args.date_from,
+        date_to=args.date_to,
         category=args.category,
-        type=validate_type(args.type) if args.type else None,
+        type=args.type,
         q=args.q,
         tag=args.tag,
     )
@@ -146,26 +165,28 @@ def cmd_search(args: argparse.Namespace) -> int:
 @log_execution
 @measure_time
 def cmd_summary(args: argparse.Namespace) -> int:
+    if args.top < 0:
+        raise ValidationError("TOP 개수는 음수일 수 없습니다.", "--top에 0 이상의 정수를 입력하세요.")
     service = build_service(args.data_dir)
     s = service.summary(args.month)
     if s["count"] == 0:
         print(f"{s['month']} 데이터 없음")
-    print(f"총 수입: {s['total_income']}원")
-    print(f"총 지출: {s['total_expense']}원")
-    print(f"잔액: {s['balance']}원")
+    print(f"총 수입: {format_integer(s['total_income'])}원")
+    print(f"총 지출: {format_integer(s['total_expense'])}원")
+    print(f"잔액: {format_integer(s['balance'])}원")
     budget = s["budget"]
     if budget is not None:
-        rate = (s["total_expense"] / budget.amount * 100) if budget.amount else 0.0
-        print(f"예산: {budget.amount}원 (사용률 {rate:.1f}%)")
+        rate = _format_budget_rate(s["total_expense"], budget.amount)
+        print(f"예산: {format_integer(budget.amount)}원 (사용률 {rate}%)")
         if s["total_expense"] > budget.amount:
             over = s["total_expense"] - budget.amount
-            print(f"[경고] 예산을 {over}원 초과했습니다!")
+            print(f"[경고] 예산을 {format_integer(over)}원 초과했습니다!")
     top = s["expense_by_category"].most_common(args.top)
     if top:
         print()
         print(f"지출 TOP {args.top}")
         for i, (cat, amt) in enumerate(top, start=1):
-            print(f"{i}) {cat} {amt}원")
+            print(f"{i}) {cat} {format_integer(amt)}원")
     return 0
 
 
@@ -176,7 +197,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
     service = build_service(args.data_dir)
     if args.budget_cmd == "set":
         b = service.set_budget(args.month, args.amount)
-        print(f"[저장 완료] {b.month} 예산 {b.amount}원")
+        print(f"[저장 완료] {b.month} 예산 {format_integer(b.amount)}원")
     return 0
 
 
@@ -244,7 +265,11 @@ def cmd_delete(args: argparse.Namespace) -> int:
 @log_execution
 @measure_time
 def cmd_export(args: argparse.Namespace) -> int:
-    service = build_service(args.data_dir)
+    if args.month and (args.date_from or args.date_to):
+        raise ValidationError(
+            "--month와 --from/--to를 함께 사용할 수 없습니다.",
+            "월 조건 또는 날짜 범위 조건 중 하나만 지정하세요.",
+        )
     if not args.month and not (args.date_from or args.date_to):
         raise ValidationError(
             "export 조건이 없습니다.",
@@ -252,12 +277,15 @@ def cmd_export(args: argparse.Namespace) -> int:
         )
     if args.month:
         month = validate_month(args.month)
-        query = SearchQuery(date_from=f"{month}-01", date_to=f"{month}-31")
+        year, month_number = map(int, month.split("-"))
+        last_day = calendar.monthrange(year, month_number)[1]
+        query = SearchQuery(date_from=f"{month}-01", date_to=f"{month}-{last_day:02d}")
     else:
         query = SearchQuery(
-            date_from=validate_date(args.date_from) if args.date_from else None,
-            date_to=validate_date(args.date_to) if args.date_to else None,
+            date_from=args.date_from,
+            date_to=args.date_to,
         )
+    service = build_service(args.data_dir)
     n = service.export_csv(Path(args.out), query)
     print(f"[완료] {args.out} ({n} records)")
     return 0
@@ -337,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sum = sub.add_parser("summary", parents=[common], help="월별 요약")
     p_sum.add_argument("--month", required=True, help="대상 월 YYYY-MM")
     p_sum.add_argument("--top", type=int, default=DEFAULT_TOP,
-                       help=f"지출 TOP N (기본: {DEFAULT_TOP})")
+                       help=f"지출 TOP N, 0은 순위 생략 (기본: {DEFAULT_TOP})")
     p_sum.set_defaults(func=cmd_summary)
 
     # budget

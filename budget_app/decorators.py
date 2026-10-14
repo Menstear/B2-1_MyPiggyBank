@@ -17,6 +17,7 @@ import time
 from typing import Any, Callable, TypeVar
 
 from .errors import BudgetError
+from .output import OutputError
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -30,6 +31,9 @@ def handle_errors(func: F) -> F:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return func(*args, **kwargs)
+        except (OutputError, BrokenPipeError):
+            # 출력 장애는 같은 채널에 재출력하지 않고 진입점에서 처리한다.
+            raise
         except BudgetError as exc:
             print(f"[오류] {exc.message}")
             if exc.hint:

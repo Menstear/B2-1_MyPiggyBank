@@ -6,7 +6,7 @@ import heapq
 import json
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
-from itertools import count
+from itertools import count, islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TextIO
@@ -32,9 +32,10 @@ def newest_transactions(
 ) -> Iterator[Transaction]:
     """날짜 최신순, 같은 날에는 높은 TX 번호 순으로 거래를 반환한다.
 
-    제한이 있으면 최대 limit건만 메모리에 보관한다. 제한이 없으면 임시
-    JSONL 파일에 작은 정렬 묶음을 기록하고 단계적으로 병합한다. 반환된
-    제너레이터를 끝까지 소비하거나 close()하면 임시 파일을 정리한다.
+    제한이 있으면 최대 limit건만 메모리에 보관한다. 제한이 없으면 한
+    청크까지는 메모리에서 정렬하고, 이를 넘을 때만 임시 JSONL 파일로
+    나누어 단계적으로 병합한다. 반환된 제너레이터를 끝까지 소비하거나
+    close()하면 임시 파일을 정리한다.
     """
     if limit is not None:
         if limit < 0:
@@ -87,6 +88,16 @@ def _combine_runs(paths: list[Path], output: Path) -> None:
 
 def _external_sort(transactions: Iterable[Transaction]) -> Iterator[Transaction]:
     try:
+        source = iter(transactions)
+        chunk = list(islice(source, _CHUNK_SIZE))
+        try:
+            overflow = next(source)
+        except StopIteration:
+            # 작은 결과는 디스크 권한/공간에 의존하지 않고 바로 정렬한다.
+            chunk.sort(key=_sort_key, reverse=True)
+            yield from chunk
+            return
+
         with TemporaryDirectory(prefix="budget-sort-") as directory:
             base = Path(directory)
             sequence = count()
@@ -111,21 +122,22 @@ def _external_sort(transactions: Iterable[Transaction]) -> Iterator[Transaction]
                     path = output
                     level += 1
 
-            chunk: list[Transaction] = []
-            for tx in transactions:
-                chunk.append(tx)
-                if len(chunk) == _CHUNK_SIZE:
-                    chunk.sort(key=_sort_key, reverse=True)
-                    path = new_path()
-                    _write_run(path, chunk)
-                    add_run(path)
-                    chunk.clear()
-            if chunk:
+            def write_chunk() -> None:
                 chunk.sort(key=_sort_key, reverse=True)
                 path = new_path()
                 _write_run(path, chunk)
                 add_run(path)
                 chunk.clear()
+
+            write_chunk()
+            chunk.append(overflow)
+            del overflow
+            for tx in source:
+                if len(chunk) == _CHUNK_SIZE:
+                    write_chunk()
+                chunk.append(tx)
+            if chunk:
+                write_chunk()
 
             paths = [path for level in levels for path in level]
             while len(paths) > _MERGE_FAN_IN:

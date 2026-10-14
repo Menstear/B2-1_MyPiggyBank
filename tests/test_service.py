@@ -96,6 +96,31 @@ class SearchTest(ServiceTestBase):
         res = self.svc.search(SearchQuery(date_from="2024-02-01", date_to="2024-02-28"))
         self.assertEqual([t.category for t in res], ["coffee"])
 
+    def test_direct_query_normalizes_once_for_search_and_export(self) -> None:
+        from budget_app.validators import validate_date, validate_type
+
+        with patch("budget_app.service.validate_date", wraps=validate_date) as dates, \
+             patch("budget_app.service.validate_type", wraps=validate_type) as types:
+            query = SearchQuery(date_from=" 2024-3-1 ", date_to="2024-3-31", type=" INCOME ")
+            self.assertEqual((query.date_from, query.date_to, query.type),
+                             ("2024-03-01", "2024-03-31", "income"))
+            self.assertEqual([tx.category for tx in self.svc.search(query)], ["salary"])
+            path = self.base / "normalized.csv"
+            self.assertEqual(self.svc.export_csv(path, query), 1)
+            with path.open(encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual([row["date"] for row in rows], ["2024-03-10"])
+            self.assertEqual(dates.call_count, 2)
+            types.assert_called_once_with(" INCOME ")
+
+    def test_direct_query_rejects_invalid_dates_types_and_reversed_range(self) -> None:
+        for params in (
+            {"date_from": "2024-02-30"}, {"date_to": "2024-13-01"},
+            {"type": "spend"}, {"date_from": "2024-2-1", "date_to": "2024-1-31"},
+        ):
+            with self.subTest(params=params), self.assertRaises(ValidationError):
+                SearchQuery(**params)
+
     def test_filter_by_keyword_and_tag(self) -> None:
         self.assertEqual(len(list(self.svc.search(SearchQuery(q="아메리카노")))), 1)
         self.assertEqual(len(list(self.svc.search(SearchQuery(tag="meal")))), 1)
@@ -217,6 +242,103 @@ class UpdateDeleteTest(ServiceTestBase):
 
 
 class CsvTest(ServiceTestBase):
+    def test_duplicate_headers_reject_entire_import_without_id_scan(self) -> None:
+        self.add()
+        original = self.svc.tx_repo.path.read_bytes()
+        path = self.base / "duplicate.csv"
+        for header, row in (
+            ("date,type,category,amount,amount", "2024-01-01,expense,food,8000,1"),
+            ("date,type,category,amount,note,note", "2024-01-01,expense,food,8000,a,b"),
+        ):
+            with self.subTest(header=header):
+                path.write_text(f"{header}\n{row}\n", encoding="utf-8")
+                with patch.object(self.svc.tx_repo, "next_number") as next_number, \
+                     patch("budget_app.repository.os.replace") as replace:
+                    with self.assertRaisesRegex(ImportExportError, "중복 컬럼"):
+                        self.svc.import_csv_report(path)
+                    next_number.assert_not_called()
+                    replace.assert_not_called()
+                self.assertEqual(self.svc.tx_repo.path.read_bytes(), original)
+                self.assertEqual(list(self.base.glob("*.tmp")), [])
+
+    def test_extra_values_are_skipped_without_importing_truncated_amount(self) -> None:
+        path = self.base / "extra.csv"
+        path.write_text(
+            "date,type,category,amount\n"
+            "2024-01-01,expense,food,1000\n"
+            "2024-01-02,expense,food,1,000\n"
+            "2024-01-03,expense,food,2000\n",
+            encoding="utf-8",
+        )
+        report = self.svc.import_csv_report(path)
+        self.assertEqual((report.imported, report.skipped), (2, 1))
+        self.assertEqual(report.samples[0].line, 3)
+        self.assertIn("헤더보다 많습니다", report.samples[0].message)
+        self.assertIn("쉼표", report.samples[0].hint)
+        self.assertEqual([(tx.id, tx.amount) for tx in self.svc.tx_repo.stream()],
+                         [("TX-000001", 1000), ("TX-000002", 2000)])
+
+    def test_missing_required_cells_skip_but_optional_cells_default_empty(self) -> None:
+        path = self.base / "short.csv"
+        path.write_text(
+            "date,type,category,amount,memo,tags\n"
+            "2024-01-01,expense,food\n"
+            "2024-01-02,expense,food,1000\n",
+            encoding="utf-8",
+        )
+        report = self.svc.import_csv_report(path)
+        self.assertEqual((report.imported, report.skipped), (1, 1))
+        self.assertEqual(report.samples[0].line, 2)
+        self.assertIn("amount", report.samples[0].message)
+        tx, = self.svc.tx_repo.stream()
+        self.assertEqual((tx.amount, tx.memo, tx.tags), (1000, "", []))
+
+    def test_no_valid_rows_do_not_scan_transactions_or_replace_storage(self) -> None:
+        self.add()
+        original = self.svc.tx_repo.path.read_bytes()
+        original_inode = self.svc.tx_repo.path.stat().st_ino
+        path = self.base / "nothing.csv"
+        for content, skipped, rejects in (
+            ("", 0, True), ("foo,bar\n1,2\n", 0, True),
+            ("date,type,category,amount\n", 0, False),
+            ("date,type,category,amount\n2024-01-01,expense,food,-1\n"
+             "2024-01-01,expense,unknown,1000\n2024-01-01,expense,food,1,000\n", 3, False),
+        ):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                with patch.object(self.svc.tx_repo, "next_number") as next_number, \
+                     patch.object(self.svc.tx_repo, "stream", side_effect=AssertionError("불필요한 거래 조회")), \
+                     patch("budget_app.repository.os.replace") as replace:
+                    if rejects:
+                        with self.assertRaises(ImportExportError):
+                            self.svc.import_csv_report(path)
+                    else:
+                        report = self.svc.import_csv_report(path)
+                        self.assertEqual((report.imported, report.skipped), (0, skipped))
+                    next_number.assert_not_called()
+                    replace.assert_not_called()
+                self.assertEqual(self.svc.tx_repo.path.read_bytes(), original)
+                self.assertEqual(self.svc.tx_repo.path.stat().st_ino, original_inode)
+
+    def test_import_scans_ids_once_and_only_valid_rows_consume_ids(self) -> None:
+        self.svc.tx_repo.append(Transaction(
+            id="TX-000042", type="expense", date="2024-01-01", amount=1000, category="food",
+        ))
+        path = self.base / "ids.csv"
+        path.write_text(
+            "date,type,category,amount\n"
+            "2024-01-01,expense,food,-1\n"
+            "2024-01-02,expense,food,2000\n"
+            "2024-01-03,expense,unknown,1000\n"
+            "2024-01-04,expense,food,3000\n",
+            encoding="utf-8",
+        )
+        with patch.object(self.svc.tx_repo, "next_number", wraps=self.svc.tx_repo.next_number) as next_number:
+            self.assertEqual(self.svc.import_csv(path), (2, 2))
+            next_number.assert_called_once_with()
+        self.assertEqual([tx.id for tx in self.svc.tx_repo.stream()],
+                         ["TX-000042", "TX-000043", "TX-000044"])
+
     def test_export_rejects_all_internal_storage_paths_without_changes(self) -> None:
         self.add()
         self.svc.set_budget("2024-01", 1000)

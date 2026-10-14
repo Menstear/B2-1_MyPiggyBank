@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -50,8 +50,13 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
         )
 
 
-def _atomic_write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    """레코드들을 임시 파일에 쓴 뒤 os.replace 로 원자적으로 교체한다."""
+def _atomic_write_jsonl(
+    path: Path,
+    records: Iterable[dict[str, Any]],
+    *,
+    should_commit: Callable[[], bool] | None = None,
+) -> None:
+    """임시 파일 작성 후 조건을 확인하고 원본을 원자적으로 교체한다."""
     tmp_fd: int | None = None
     tmp_name: str | None = None
     try:
@@ -62,6 +67,9 @@ def _atomic_write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
         with f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            # 조회와 임시 파일 작성을 한 번에 수행한 뒤, 변경 대상이 없으면 취소한다.
+            if should_commit is not None and not should_commit():
+                return
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, path)  # 원자적 교체
@@ -94,9 +102,15 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # 버퍼가 실패 후 close 때 다시 기록하는 일을 막기 위해 비버퍼 이진 I/O 사용.
-        with path.open("ab", buffering=0) as f:
+        with path.open("a+b", buffering=0) as f:
             f.seek(0, os.SEEK_END)
             original_size = f.tell()
+            if original_size:
+                f.seek(-1, os.SEEK_END)
+                # 마지막 레코드에 줄바꿈이 없어도 새 레코드와 붙지 않게 한다.
+                # 추가한 구분자도 실패 시 original_size까지 함께 되돌린다.
+                if f.read(1) not in (b"\n", b"\r"):
+                    payload = b"\n" + payload
             remaining = memoryview(payload)
             while remaining:
                 written = f.write(remaining)
@@ -210,7 +224,7 @@ class TransactionRepository:
                 else:
                     yield tx.to_dict()
 
-        _atomic_write_jsonl(self.path, gen())
+        _atomic_write_jsonl(self.path, gen(), should_commit=lambda: updated is not None)
         if updated is None:
             from .errors import NotFoundError
 
@@ -232,7 +246,7 @@ class TransactionRepository:
                     continue
                 yield tx.to_dict()
 
-        _atomic_write_jsonl(self.path, gen())
+        _atomic_write_jsonl(self.path, gen(), should_commit=lambda: deleted)
         return deleted
 
 

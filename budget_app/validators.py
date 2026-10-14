@@ -16,19 +16,31 @@ VALID_TYPES: tuple[str, str] = ("income", "expense")
 def validate_date(value: str) -> str:
     """'YYYY-MM-DD' 형식 검증. 올바르면 zero-pad 정규화한 문자열을 반환.
 
-    strptime 은 '2024-1-5' 같은 비정규 입력도 통과시키므로,
-    date.isoformat 으로 '2024-01-05' 로 정규화한다.
+    정규 형식은 fromisoformat으로 빠르게 검증하고, '2024-1-5' 같은
+    비정규 입력은 strptime으로 읽어 '2024-01-05'로 정규화한다.
     (정규화하지 않으면 월 매칭 date[:7] 과 날짜 문자열 비교가 틀어진다.)
     """
     text = (value or "").strip()
     try:
-        parsed = dt.datetime.strptime(text, "%Y-%m-%d")
+        # fromisoformat이 허용하는 다른 ISO 표기(주차/구분자 생략)는
+        # 기존 입력 계약에 없으므로 YYYY-MM-DD에만 빠른 경로를 적용한다.
+        if (
+            len(text) == 10
+            and text[4] == text[7] == "-"
+            and text.isascii()
+            and text[:4].isdigit()
+            and text[5:7].isdigit()
+            and text[8:].isdigit()
+        ):
+            parsed = dt.date.fromisoformat(text)
+        else:
+            parsed = dt.datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         raise ValidationError(
             f"날짜 형식이 올바르지 않습니다: {text!r}",
             "예: 2024-01-15 (YYYY-MM-DD)",
         )
-    return parsed.date().isoformat()
+    return parsed.isoformat()
 
 
 def validate_month(value: str) -> str:

@@ -7,9 +7,20 @@ __pycache__/
 /test-data/
 /test-import-data/
 
+# --data-dir로 다른 폴더를 지정해도 개인 가계부 파일은 제외
+transactions.jsonl
+categories.jsonl
+budgets.jsonl
+
 # 직접 검증할 때 생성하는 CSV
 /export.csv
 /test-export.csv
+
+# 저장 중 생기는 임시 파일과 편집기 백업
+*.tmp
+*.swp
+*.swo
+*~
 
 # Python 가상환경
 .venv/
